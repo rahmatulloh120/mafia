@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mafia</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0a0508;--panel:#1a0b11;--line:#3a1520;--red:#c8102e;--txt:#f1e6e8;--mut:#9a8186;font-family:Inter,system-ui,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top,#2a0a14,var(--bg) 70%);color:var(--txt);min-height:100vh;transition:background 1.2s,filter 1.2s}
+body.day{background:radial-gradient(ellipse at top,#5a2a1c,#1d0d0d 75%)}
+body.night{background:radial-gradient(ellipse at top,#0a0a1c,#020104 75%)}
+h1,h2{font-family:'Playfair Display',serif;margin:.2em 0}h1{font-size:clamp(2.4rem,9vw,4.5rem);letter-spacing:.04em}
+.wrap{max-width:1000px;margin:auto;padding:16px;display:grid;gap:14px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+button,input,select{font:inherit;color:var(--txt);background:#26101a;border:1px solid var(--line);border-radius:8px;padding:10px 14px}
+button{cursor:pointer;transition:transform .15s,background .15s}button:hover{background:var(--red);transform:translateY(-1px)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--red)}button.on{background:var(--red)}button:disabled{opacity:.4;pointer-events:none}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.grow{flex:1}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px}
+.card{border:1px solid var(--line);border-radius:10px;padding:12px;text-align:center;background:#210d16;position:relative;cursor:default}
+.card.pick{cursor:pointer}.card.pick:hover{border-color:var(--red);transform:translateY(-2px)}.card.sel{border-color:var(--red);box-shadow:0 0 0 2px var(--red) inset}
+.card.dead{opacity:.45;filter:grayscale(1)}.card.speak{box-shadow:0 0 14px var(--red)}
+.av{width:46px;height:46px;border-radius:50%;margin:0 auto 6px;background:var(--red);display:grid;place-items:center;font-weight:700;font-family:'Playfair Display'}
+.sm{color:var(--mut);font-size:.85rem}.badge{position:absolute;top:6px;right:8px;background:var(--red);border-radius:12px;padding:0 8px;font-size:.8rem}
+#timer{font-family:'Playfair Display';font-size:2.4rem}
+#log{height:200px;overflow:auto;display:flex;flex-direction:column;gap:4px;font-size:.92rem}.m-mafia{color:#ff6b81}.m-ghost{color:#9bb}.m-sys{color:var(--mut)}
+.role{font-family:'Playfair Display';font-size:1.6rem;color:var(--red)}
+.death{animation:d 1.6s ease both;text-align:center;font-size:1.3rem}@keyframes d{0%{transform:scale(1.3);filter:blur(6px);opacity:0}100%{transform:none;filter:none;opacity:1}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style></head><body>
+<div id="app"></div><div id="audio"></div>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const S = io(), $ = s => document.querySelector(s), L = localStorage;
+let st = null, stream = null, micOn = false, pcs = {}, level = {}, built = false;
+const esc = s => String(s).replace(/[&<>"']/g, c => '&#' + c.charCodeAt(0) + ';');
+const NAMES = { mafia: 'Mafia', civilian: 'Civilian', doctor: 'Doctor', detective: 'Detective' };
+function ack(r) { if (r.error) { alert(r.error); if (r.error === 'no room') L.clear(); return; } L.tok = r.token; L.code = r.code; if (r.name) L.name = r.name; }
+S.on('connect', () => { if (L.code && L.tok) S.emit('join', { code: L.code, token: L.tok, name: L.name }, ack); });
+S.on('kicked', () => { L.clear(); st = null; built = false; closeAll(); home('You were removed from the room by the host.'); });
+S.on('state', s => { st = s; render(); syncVoice(); });
+S.on('chat', m => addLog(`<span class="m-${m.ch}">${m.ch === 'public' ? '' : '[' + m.ch + '] '}<b>${esc(m.from)}</b>: ${esc(m.text)}</span>`));
+function addLog(h) { const l = $('#log'); if (!l) return; l.insertAdjacentHTML('beforeend', `<div>${h}</div>`); l.scrollTop = 1e9; }
+
+function home(msg = '') {
+  $('#app').innerHTML = `<div class="wrap" style="text-align:center;padding-top:8vh"><h1>MAFIA</h1><p class="sm">${msg || 'Real friends. Real voices. Someone is lying.'}</p>
+  <div class="panel"><h2>Create a room (Boshlovchi)</h2><button id="c">Create room as host</button></div>
+  <div class="panel"><h2>Join a room (O‘yinchi)</h2><div class="row" style="justify-content:center"><input id="code" placeholder="Room code" maxlength="5" style="text-transform:uppercase;width:140px"><input id="nick" placeholder="Nickname" maxlength="16"><button id="j">Join</button></div></div></div>`;
+  $('#c').onclick = () => S.emit('create', {}, ack);
+  $('#j').onclick = () => { const n = $('#nick').value.trim(); L.tok = ''; L.name = n; S.emit('join', { code: $('#code').value.trim(), name: n }, ack); };
+}
+function skeleton() {
+  $('#app').innerHTML = `<div class="wrap"><div class="panel row"><div><h2 id="ttl"></h2><div class="sm" id="sub"></div></div><div class="grow"></div><div id="timer"></div></div>
+  <div id="main" class="panel"></div>
+  <div class="panel"><div class="row" id="mic"></div><div id="players" class="cards" style="margin-top:10px"></div></div>
+  <div class="panel"><div id="log"></div><div class="row" style="margin-top:8px"><input id="msg" class="grow" maxlength="300" placeholder="Message"><button id="send">Send</button></div></div></div>`;
+  const send = () => { const i = $('#msg'); if (i.value.trim()) S.emit('chat', i.value); i.value = ''; };
+  $('#send').onclick = send; $('#msg').onkeydown = e => e.key === 'Enter' && send(); built = true;
+}
+function render() {
+  if (!built) skeleton();
+  document.body.className = st.phase === 'night' ? 'night' : (st.phase === 'day' || st.phase === 'vote') ? 'day' : '';
+  const me = st.me, p = st.phase, host = st.host, ph = { lobby: 'Lobby', night: 'Night 🌙', day: 'Day ☀️ Discussion', vote: 'Day ☀️ Voting', ended: 'Game over' }[p] || '…';
+  $('#ttl').textContent = ph; $('#sub').textContent = `Room ${st.code}` + (host ? ' · you are the host' : me ? ` · ${me.name}${me.alive ? '' : ' (dead)'}` : '');
+  const canChat = !!me && !me.muted && (!me.alive && p !== 'lobby' || p !== 'night' || me.role === 'mafia' && me.alive);
+  $('#msg').disabled = $('#send').disabled = !canChat;
+  $('#msg').placeholder = !me ? 'Host cannot chat' : p === 'night' ? (me.alive && me.role === 'mafia' ? 'Mafia private chat' : 'Chat is closed at night') : !me.alive && p !== 'lobby' ? 'Ghost chat (dead only)' : 'Public chat';
+  let h = '';
+  if (me && me.role && p !== 'lobby') h += `<div>Your role: <span class="role">${NAMES[me.role]}</span></div>`;
+  if (p === 'lobby') {
+    h += `<p>Share code <b style="font-size:1.6rem;letter-spacing:.2em">${st.code}</b> · ${st.players.length}/10 players (minimum 4)</p>`;
+    if (host) h += settingsHtml() + `<button id="start" ${st.players.length < 4 ? 'disabled' : ''}>Start game</button>`;
+    else h += '<p class="sm">Waiting for the host to start…</p>';
+  }
+  if ((p === 'day' || p === 'vote' || p === 'night') && st.event) h += eventHtml();
+  if (p === 'night' && me) {
+    if (!me.alive) h += '<p>You are dead. Watch in silence — the ghost chat is open.</p>';
+    else if (me.role === 'mafia') h += '<p>Choose a victim together. Most votes wins.</p>';
+    else if (me.role === 'doctor') h += '<p>Pick who to protect tonight.</p>';
+    else if (me.role === 'detective') h += '<p>Pick who to investigate.</p>';
+    else h += '<p>Night falls. Stay quiet and sleep.</p>';
+  }
+  if (p === 'day') h += '<p>Discuss. Who is lying?</p>';
+  if (p === 'vote') h += `<p>${me && me.alive ? 'Tap a player to vote. You can change until time runs out.' : 'Voting in progress.'}</p>`;
+  if (st.det && st.det.length) h += `<p class="sm">Investigations: ${st.det.map(d => `${esc(d.name)} — <b>${d.mafia ? 'MAFIA' : 'not mafia'}</b>`).join(', ')}</p>`;
+  if (p === 'ended') h += `<h2>${st.winner === 'mafia' ? 'The Mafia wins' : st.winner === 'civilians' ? 'The Town wins' : 'Game ended by host'}</h2>` + (host ? '<button id="start" ' + (st.players.length < 4 ? 'disabled' : '') + '>Play again</button>' : '');
+  if (host && ['night', 'day', 'vote'].includes(p)) h += `<div class="row" style="margin-top:10px">${p === 'night' ? '<button id="sk">Skip Night</button>' : p === 'day' ? '<button id="sk">Skip Day</button>' : '<button id="sk">Finish voting</button>'}<button id="end">End game</button></div>`;
+  $('#main').innerHTML = h;
+  const b = id => $(id); if (b('#start')) b('#start').onclick = () => S.emit('start'); if (b('#sk')) b('#sk').onclick = () => S.emit('skip'); if (b('#end')) b('#end').onclick = () => confirm('End the game?') && S.emit('end');
+  if (b('#save')) b('#save').onclick = () => S.emit('settings', { night: +$('#sn').value, day: +$('#sd').value, vote: +$('#sv').value, reveal: $('#sr').checked, selfVote: $('#ss').checked });
+  const pick = (p === 'vote' && me && me.alive) ? 'vote' : (p === 'night' && me && me.alive && ['mafia', 'doctor', 'detective'].includes(me.role)) ? 'night' : null;
+  $('#players').innerHTML = st.players.map(q => {
+    const can = pick && q.alive && (pick === 'vote' ? (q.pid !== me.pid || st.s.selfVote) : me.role === 'mafia' ? q.role !== 'mafia' : me.role === 'detective' ? q.pid !== me.pid : true);
+    const sel = (st.myVote || st.myPick) === q.pid, n = st.counts && st.counts[q.pid];
+    return `<div class="card ${can ? 'pick' : ''} ${sel ? 'sel' : ''} ${q.alive ? '' : 'dead'} ${level[q.pid] > 20 ? 'speak' : ''}" data-pid="${q.pid}" data-can="${can ? 1 : 0}">
+      ${n ? `<span class="badge">${n}</span>` : ''}<div class="av">${esc(q.name[0].toUpperCase())}</div><b>${esc(q.name)}</b>
+      <div class="sm">${q.connected ? 'online' : 'disconnected'}${q.muted ? ' · muted' : ''}${q.role ? ' · ' + NAMES[q.role] : ''}${!q.alive ? ' · dead' : ''}</div>
+      ${host ? `<div class="row" style="justify-content:center;margin-top:6px"><button data-a="mute" data-p="${q.pid}">Mute</button><button data-a="kick" data-p="${q.pid}">Kick</button><button data-a="ban" data-p="${q.pid}">Ban</button></div>` : ''}</div>`;
+  }).join('') || '<span class="sm">No players yet.</span>';
+  document.querySelectorAll('.card').forEach(c => c.onclick = e => {
+    const a = e.target.dataset.a; if (a) { if (a === 'mute') S.emit('mute', e.target.dataset.p); else if (confirm(a + ' this player?')) S.emit('remove', { pid: e.target.dataset.p, ban: a === 'ban' }); return; }
+    if (c.dataset.can !== '1') return; const pid = c.dataset.pid; S.emit(pick, pick === 'vote' && st.myVote === pid ? null : pid);
+  });
+  micHtml();
+}
+function settingsHtml() { const s = st.s; return `<div class="row" style="margin:8px 0"><label>Night s <input id="sn" type="number" value="${s.night}" style="width:80px"></label><label>Day s <input id="sd" type="number" value="${s.day}" style="width:80px"></label><label>Vote s <input id="sv" type="number" value="${s.vote}" style="width:80px"></label>
+  <label><input id="sr" type="checkbox" ${s.reveal ? 'checked' : ''}> Reveal roles of the dead</label><label><input id="ss" type="checkbox" ${s.selfVote ? 'checked' : ''}> Allow self-vote</label><button id="save">Save</button></div>`; }
+function eventHtml() { const e = st.event; if (st.phase === 'night' && e.by !== 'vote') return ''; return `<div class="death">${e.type === 'death' ? `☠ ${esc(e.name)} was ${e.by === 'vote' ? 'eliminated by vote' : 'killed in the night'}${e.role ? ' — ' + NAMES[e.role] : ''}.` : e.type === 'tie' ? 'Tie vote — nobody was eliminated.' : 'Everyone survived the night.'}</div>`; }
+setInterval(() => { const t = $('#timer'); if (t) t.textContent = st && st.endsAt ? Math.max(0, Math.ceil((st.endsAt - Date.now()) / 1000)) + 's' : ''; }, 250);
+
+// ---- voice (WebRTC mesh; server only allows signaling inside the current voice group) ----
+function micHtml() {
+  if (!st.me) { $('#mic').innerHTML = '<span class="sm">Host has no voice channel.</span>'; return; }
+  const g = st.group; $('#mic').innerHTML = `<button id="mb" class="${micOn ? 'on' : ''}">${stream ? (micOn ? 'Mic on' : 'Mic off') : 'Enable microphone'}</button><span class="sm">${g ? 'Voice channel: ' + g : 'Voice is closed right now'}</span>`;
+  $('#mb').onclick = async () => {
+    if (!stream) { try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); micOn = true; closeAll(); syncVoice(); }
+      catch (e) { alert('Microphone permission denied. You can listen but not speak. Allow the mic in your browser settings and try again.'); return; } }
+    else micOn = !micOn; applyMic(); micHtml();
+  };
+}
+function applyMic() { if (stream) stream.getAudioTracks().forEach(t => t.enabled = micOn && !!st.group); }
+function closeAll() { Object.keys(pcs).forEach(closePc); }
+function closePc(pid) { const o = pcs[pid]; if (!o) return; o.pc.close(); o.el && o.el.remove(); clearInterval(o.iv); delete pcs[pid]; delete level[pid]; }
+function syncVoice() {
+  if (!st || !st.me) return; applyMic();
+  const want = new Set(st.peers); Object.keys(pcs).forEach(p => !want.has(p) && closePc(p));
+  want.forEach(pid => { if (!pcs[pid]) makePc(pid, st.me.pid < pid); });
+}
+function makePc(pid, initiator) {
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, ...(window.TURN || [])] }), o = pcs[pid] = { pc };
+  if (stream) stream.getTracks().forEach(t => pc.addTrack(t, stream)); else pc.addTransceiver('audio', { direction: 'recvonly' });
+  pc.onicecandidate = e => e.candidate && S.emit('rtc', { to: pid, data: { ice: e.candidate } });
+  pc.ontrack = e => {
+    const el = document.createElement('audio'); el.autoplay = true; el.srcObject = e.streams[0]; $('#audio').appendChild(el); o.el = el;
+    try { const ac = new AudioContext(), an = ac.createAnalyser(), d = new Uint8Array(an.fftSize); ac.createMediaStreamSource(e.streams[0]).connect(an);
+      o.iv = setInterval(() => { an.getByteTimeDomainData(d); const v = Math.max(...d) - 128, was = level[pid] > 20; level[pid] = v; const c = document.querySelector(`[data-pid="${pid}"]`); if (c) c.classList.toggle('speak', v > 20); }, 200); } catch (_) {}
+  };
+  if (initiator) pc.onnegotiationneeded = async () => { await pc.setLocalDescription(await pc.createOffer()); S.emit('rtc', { to: pid, data: { sdp: pc.localDescription } }); };
+}
+S.on('rtc', async ({ from, data }) => {
+  if (!pcs[from]) makePc(from, false); const pc = pcs[from].pc;
+  try {
+    if (data.sdp) { await pc.setRemoteDescription(data.sdp); if (data.sdp.type === 'offer') { await pc.setLocalDescription(await pc.createAnswer()); S.emit('rtc', { to: from, data: { sdp: pc.localDescription } }); } }
+    else if (data.ice) await pc.addIceCandidate(data.ice);
+  } catch (e) { console.warn(e); }
+});
+home();
+</script></body></html>
